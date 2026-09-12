@@ -39,6 +39,25 @@ reach exactly what its key can reach and nothing else.
 | `move_page` | Move a page to another folder or space |
 | `delete_page` | Delete a page, reporting what was removed |
 
+**Sharing**
+
+Everything here hands something to somebody else, so each tool says plainly how
+far the grant reaches.
+
+| Tool | What it does |
+| --- | --- |
+| `share_page` | Give named people access to one page by email, inviting anyone without an account |
+| `share_space` | Hand over a whole space, including pages added to it later - a far bigger grant than `share_page` |
+| `share_page_by_link` | Make a page readable by **anyone with the link**, with no sign-in |
+| `stop_sharing_by_link` | Withdraw that link, so the old one stays dead |
+| `unshare_page` | Take one person's access to a page away |
+| `remove_from_space` | Remove somebody from a space entirely |
+| `list_people_with_access` | Who can see a page, and who is only invited |
+| `list_space_members` | Who is in a space, and who has not joined yet |
+| `list_shared_with_you` | Pages and spaces other people have shared with this account |
+| `read_public_page` | Read a page shared by link, whether or not it is yours |
+| `clone_page` | Take a private copy of a page somebody shared, so it cannot be withdrawn |
+
 **Files**
 
 | Tool | What it does |
@@ -58,6 +77,18 @@ reach exactly what its key can reach and nothing else.
 
 Every tool carries a description written for an agent to read, including what to
 pass, what comes back, and which tool to reach for next.
+
+### What a key can reach
+
+There is no authority here beyond the caller's own key: every request is made
+with it, and the Knowledge Base's own permission rules decide the answer. Two
+limits are this server's own, because they are not the API's to enforce:
+
+- Ids are checked before they become part of a request path, so a tool cannot
+  be steered onto an endpoint other than the one it describes.
+- `upload_document`'s `url` is fetched only from public addresses, and only up
+  to 50 MB. The server sits on the same private network as the database, the
+  object store and the vector store; a caller-chosen URL must not reach them.
 
 ### Pages have a type
 

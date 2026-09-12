@@ -16,7 +16,11 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import contextlib
+import ipaddress
 import mimetypes
+import re
+import socket
 import time
 from typing import Annotated, Any, Literal
 from uuid import uuid4
@@ -50,9 +54,12 @@ Where to start:
 - `share_page` gives named people access by email, inviting anyone who has no
   account yet. `share_page_by_link` makes a page readable by anyone at all -
   say so plainly before using it.
-- `list_shared_with_you` shows what other people have shared. Those pages are
-  not yours: editing one changes what its owner sees, and it can be withdrawn.
+- `list_shared_with_you` shows what other people have shared - whole spaces and
+  individual pages, kept apart because they are different grants. Those are not
+  yours: editing one changes what its owner sees, and it can be withdrawn.
   `clone_page` takes a private copy that cannot be taken away.
+- `share_space` hands over a whole space, including anything added to it later.
+  It is a much bigger grant than `share_page`; say so before using it.
 
 Worth knowing:
 - A new or edited page takes a short while to become searchable; everything
@@ -124,6 +131,30 @@ async def _call(coro: Any) -> Any:
         raise _fail(exc) from exc
 
 
+# Ids and slugs are the only caller-supplied values that become part of a URL
+# path. Everything the API mints is a UUID or a short slug, so this is what one
+# looks like.
+_SAFE_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
+
+
+def _ident(value: str, what: str) -> str:
+    """Check an id before it is pasted into a request path.
+
+    httpx resolves `..` while building the URL, so an id of
+    `../namespaces/<uuid>` would silently turn a call about one page into a
+    call about a whole space - with the caller's own credentials, against an
+    endpoint the tool never meant to touch. The same goes for a `?`, which
+    would append query parameters to somebody else's request. Refusing here is
+    what keeps each tool's reach equal to its description.
+    """
+    if not _SAFE_ID.match(value):
+        raise ToolError(
+            f"That is not a valid {what}. Ids are letters, digits, hyphens and "
+            "underscores; use list_spaces or browse_space to get real ones."
+        )
+    return value
+
+
 # ---------------------------------------------------------------------------
 # Orientation
 # ---------------------------------------------------------------------------
@@ -188,7 +219,7 @@ async def browse_space(
 
     Pages are listed without their content - call `get_page` for that.
     """
-    tree = await _call(kb().get(f"/namespaces/{space_id}/tree"))
+    tree = await _call(kb().get(f"/namespaces/{_ident(space_id, 'space id')}/tree"))
     return {
         "space": fmt.space(tree["namespace"]),
         "folders": [fmt.folder(f) for f in tree["folders"]],
@@ -234,15 +265,16 @@ async def get_page(
     Works for your own pages, pages shared with you, and pages shared by link -
     the last of those even when they belong to somebody else entirely.
     """
+    doc_id = _ident(page_id, "page id")
     try:
-        doc = await kb().get(f"/documents/{page_id}")
+        doc = await kb().get(f"/documents/{doc_id}")
     except KnowledgeBaseError as exc:
         if exc.status != 404:
             raise _fail(exc) from exc
         # Not yours, or not there at all. A page shared by link is readable by
         # anyone, so try that before reporting it missing.
         try:
-            public = await kb().get(f"/public/documents/{page_id}")
+            public = await kb().get(f"/public/documents/{doc_id}")
         except KnowledgeBaseError:
             raise _fail(exc) from exc
         return fmt.public_page(public)
@@ -487,11 +519,12 @@ async def update_page(
         )
 
     api = kb()
+    doc_id = _ident(page_id, "page id")
     payload: dict[str, Any] = {}
 
     if content is not None:
         if mode == "append":
-            current = await _call(api.get(f"/documents/{page_id}"))
+            current = await _call(api.get(f"/documents/{doc_id}"))
             # Appending happens in HTML because that is what is stored; the new
             # part is converted first so markdown still renders.
             addition = content
@@ -507,9 +540,24 @@ async def update_page(
                         },
                     )
                 )
-                addition = converted["content_html"]
-                await _call(api.delete(f"/documents/{converted['id']}"))
-            payload["content"] = current["content_html"] + addition
+                # The scratch page exists only to be converted, and it is in the
+                # caller's own space, so it has to go whatever happens next -
+                # otherwise a bad conversion leaves "__append_scratch__" behind
+                # permanently, indexed and searchable.
+                try:
+                    if "content_html" not in converted:
+                        raise ToolError(
+                            "The Knowledge Base did not return converted HTML "
+                            "for the appended content, so nothing was changed."
+                        )
+                    addition = converted["content_html"]
+                finally:
+                    scratch = str(converted.get("id", ""))
+                    if _SAFE_ID.match(scratch):
+                        # A failure to tidy up must not replace the real error.
+                        with contextlib.suppress(KnowledgeBaseError):
+                            await api.delete(f"/documents/{scratch}")
+            payload["content"] = (current.get("content_html") or "") + addition
             payload["content_format"] = "html"
         else:
             payload["content"] = content
@@ -522,7 +570,7 @@ async def update_page(
         # clear it, which is why omitting the argument is a different thing.
         payload["doc_type"] = doc_type
 
-    doc = await _call(api.put(f"/documents/{page_id}", json=payload))
+    doc = await _call(api.put(f"/documents/{doc_id}", json=payload))
     return {"updated": fmt.page_summary(doc)}
 
 
@@ -569,13 +617,26 @@ async def move_page(
 ) -> dict[str, Any]:
     """Move a page to another folder, or to another space entirely.
 
+    Give at least one destination. Passing a `space_id` with no `folder_id`
+    puts the page at the root of that space, which is also how to take a page
+    out of its folder without moving it anywhere else: pass the space it is
+    already in.
+
     You need editor access to the destination space.
     """
+    if space_id is None and folder_id is None:
+        raise ToolError(
+            "Give a destination: a `space_id`, a `folder_id`, or both. Passing "
+            "neither would move the page to the root of its space, which is "
+            "unlikely to be what was meant."
+        )
     body: dict[str, Any] = {}
     if space_id is not None:
         body["namespace_id"] = space_id
     body["folder_id"] = folder_id
-    doc = await _call(kb().post(f"/documents/{page_id}/move", json=body))
+    doc = await _call(
+        kb().post(f"/documents/{_ident(page_id, 'page id')}/move", json=body)
+    )
     return {"moved": fmt.page_summary(doc)}
 
 
@@ -588,8 +649,9 @@ async def delete_page(
     There is no undo and no recycle bin. Read the page first if there is any
     doubt about which one this is.
     """
-    doc = await _call(kb().get(f"/documents/{page_id}"))
-    await _call(kb().delete(f"/documents/{page_id}"))
+    doc_id = _ident(page_id, "page id")
+    doc = await _call(kb().get(f"/documents/{doc_id}"))
+    await _call(kb().delete(f"/documents/{doc_id}"))
     return {"deleted": {"id": page_id, "title": doc.get("title")}}
 
 
@@ -622,9 +684,10 @@ async def list_people_with_access(
     confirmed on an account.
     """
     api = kb()
-    shares = await _call(api.get(f"/documents/{page_id}/shares"))
-    invitations = await _call(api.get(f"/documents/{page_id}/invitations"))
-    page = await _call(api.get(f"/documents/{page_id}"))
+    doc_id = _ident(page_id, "page id")
+    shares = await _call(api.get(f"/documents/{doc_id}/shares"))
+    invitations = await _call(api.get(f"/documents/{doc_id}/invitations"))
+    page = await _call(api.get(f"/documents/{doc_id}"))
     out: dict[str, Any] = {
         "people": [fmt.share(s) for s in shares.get("data", [])],
         "invited": [fmt.invitation(i) for i in invitations],
@@ -675,7 +738,9 @@ async def share_page(
     }
     if message:
         body["message"] = message
-    data = await _call(kb().post(f"/documents/{page_id}/shares/batch", json=body))
+    data = await _call(
+        kb().post(f"/documents/{_ident(page_id, 'page id')}/shares/batch", json=body)
+    )
     return {
         "shared": [fmt.share(s) for s in data.get("shared", [])],
         "invited": [fmt.invitation(i) for i in data.get("invited", [])],
@@ -686,12 +751,92 @@ async def share_page(
 
 
 @mcp.tool
+async def share_space(
+    space_id: Annotated[str, Field(description="Space id from list_spaces")],
+    emails: Annotated[
+        list[str],
+        Field(min_length=1, max_length=50, description="Email addresses to invite"),
+    ],
+    role: Annotated[
+        Literal["viewer", "editor", "admin"],
+        Field(description="What they may do in the space"),
+    ] = "viewer",
+    message: Annotated[
+        str | None,
+        Field(max_length=1000, description="A note from you, included in the email"),
+    ] = None,
+) -> dict[str, Any]:
+    """Share a whole space with people, by email address.
+
+    **This is a much bigger grant than `share_page`.** It covers everything in
+    the space, including pages added later. Say so before doing it, and prefer
+    sharing individual pages when that is what was actually asked for.
+
+    Roles: `viewer` reads, `editor` reads and changes, `admin` can also share the
+    space onwards. Addresses with no account are invited by email and join when
+    that address is confirmed.
+
+    Requires admin on the space.
+    """
+    body: dict[str, Any] = {"emails": emails, "role": role}
+    if message:
+        body["message"] = message
+    data = await _call(
+        kb().post(
+            f"/namespaces/{_ident(space_id, 'space id')}/members/batch", json=body
+        )
+    )
+    return {
+        "shared": [fmt.share(m) for m in data.get("shared", [])],
+        "invited": [fmt.invitation(i) for i in data.get("invited", [])],
+        "skipped": data.get("skipped", []),
+        "people_in_space": data.get("members"),
+        "limit": data.get("max_members"),
+    }
+
+
+@mcp.tool
+async def list_space_members(
+    space_id: Annotated[str, Field(description="Space id")],
+) -> dict[str, Any]:
+    """Who is in a space, and who has been invited but not joined yet."""
+    api = kb()
+    space = _ident(space_id, "space id")
+    members = await _call(api.get(f"/namespaces/{space}/members"))
+    invitations = await _call(api.get(f"/namespaces/{space}/invitations"))
+    return {
+        "members": [fmt.share(m) for m in members.get("data", [])],
+        "invited": [fmt.invitation(i) for i in invitations],
+    }
+
+
+@mcp.tool
+async def remove_from_space(
+    space_id: Annotated[str, Field(description="Space id")],
+    user_id: Annotated[str, Field(description="User id from list_space_members")],
+) -> dict[str, Any]:
+    """Remove somebody from a space. They lose everything in it immediately."""
+    await _call(
+        kb().delete(
+            f"/namespaces/{_ident(space_id, 'space id')}"
+            f"/members/{_ident(user_id, 'user id')}"
+        )
+    )
+    return {"removed": user_id, "space_id": space_id}
+
+
+@mcp.tool
 async def unshare_page(
     page_id: Annotated[str, Field(description="Page id")],
     user_id: Annotated[str, Field(description="User id from list_people_with_access")],
 ) -> dict[str, Any]:
     """Take away one person's access to a page. They lose it immediately."""
-    await _call(kb().delete(f"/documents/{page_id}/shares/{user_id}"))
+    await _call(
+        kb().delete(
+            f"/documents/{_ident(page_id, 'page id')}"
+            f"/shares/{_ident(user_id, 'user id')}"
+        )
+    )
     return {"removed": user_id, "page_id": page_id}
 
 
@@ -709,7 +854,7 @@ async def share_page_by_link(
     and sharing again afterwards produces a different link, so the old one stays
     dead.
     """
-    data = await _call(kb().post(f"/documents/{page_id}/public"))
+    data = await _call(kb().post(f"/documents/{_ident(page_id, 'page id')}/public"))
     return {
         "url": data["url"],
         "slug": data["slug"],
@@ -722,7 +867,7 @@ async def stop_sharing_by_link(
     page_id: Annotated[str, Field(description="Page id")],
 ) -> dict[str, Any]:
     """Withdraw a page's public link. Anyone still holding it gets nothing."""
-    await _call(kb().delete(f"/documents/{page_id}/public"))
+    await _call(kb().delete(f"/documents/{_ident(page_id, 'page id')}/public"))
     return {"page_id": page_id, "public": False}
 
 
@@ -747,6 +892,7 @@ async def read_public_page(
     identifier = link_or_id.strip().rstrip("/").rsplit("/", 1)[-1]
     if not identifier:
         raise ToolError("That does not look like a link or an id.")
+    identifier = _ident(identifier, "public link or id")
     return fmt.public_page(await _call(kb().get(f"/public/documents/{identifier}")))
 
 
@@ -778,7 +924,9 @@ async def clone_page(
         body["folder_id"] = folder_id
     if title:
         body["title"] = title
-    doc = await _call(kb().post(f"/documents/{page_id}/clone", json=body))
+    doc = await _call(
+        kb().post(f"/documents/{_ident(page_id, 'page id')}/clone", json=body)
+    )
     return {
         "created": fmt.page_summary(doc),
         "note": "This copy is yours and private until you share it.",
@@ -788,6 +936,103 @@ async def clone_page(
 # ---------------------------------------------------------------------------
 # Files
 # ---------------------------------------------------------------------------
+
+# What the API accepts in one batch; refusing here means a rejected call costs
+# no memory rather than decoding every file first only to be told no.
+MAX_UPLOAD_FILES = 20
+# The API's own per-file ceiling. Matching it keeps the refusal local.
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+MAX_FETCH_BYTES = MAX_UPLOAD_BYTES
+# A handful of hops is a real redirect chain; more is a loop or a trick.
+MAX_FETCH_REDIRECTS = 3
+
+
+def _is_reachable_address(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Whether an address belongs to the internet rather than to this network.
+
+    This server runs beside the Knowledge Base, its database, its object store
+    and an unauthenticated vector store, and on a cloud host the link-local
+    address answers with instance credentials. A URL the caller chose must not
+    be able to reach any of them.
+    """
+    return not (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
+
+
+async def _check_fetch_target(url: httpx.URL) -> None:
+    if url.scheme not in ("http", "https"):
+        raise ToolError(
+            "Only http and https URLs can be fetched. Send the file as "
+            "`content_base64` instead."
+        )
+    host = url.host
+    if not host:
+        raise ToolError("That URL has no host.")
+
+    addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
+    try:
+        addresses = [ipaddress.ip_address(host)]
+    except ValueError:
+        loop = asyncio.get_running_loop()
+        try:
+            infos = await loop.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+        except (OSError, socket.gaierror) as exc:
+            raise ToolError(f"Could not look up {host}.") from exc
+        for info in infos:
+            try:
+                addresses.append(ipaddress.ip_address(info[4][0]))
+            except ValueError:
+                # An address this process cannot even parse is not one it
+                # should be dialling.
+                raise ToolError(f"Could not look up {host}.") from None
+
+    if not addresses or not all(_is_reachable_address(a) for a in addresses):
+        raise ToolError(
+            f"{host} is inside the network this server runs in, so it will not "
+            "be fetched. Use a public http(s) URL, or send the file as "
+            "`content_base64`."
+        )
+
+
+async def _fetch_file(url: str) -> bytes:
+    """Fetch a caller-supplied URL, with every hop checked and a size ceiling.
+
+    Redirects are followed by hand because the check has to run again on each
+    one: validating only the URL the caller typed is no protection when the
+    server it names answers with a redirect to an internal address.
+    """
+    target = httpx.URL(url)
+    async with httpx.AsyncClient(
+        timeout=settings.KB_TIMEOUT_SECONDS, follow_redirects=False
+    ) as client:
+        for _ in range(MAX_FETCH_REDIRECTS + 1):
+            await _check_fetch_target(target)
+            async with client.stream("GET", target) as response:
+                if response.is_redirect:
+                    location = response.headers.get("location")
+                    if not location:
+                        raise ToolError(f"{target} redirected to nowhere.")
+                    target = target.join(location)
+                    continue
+                response.raise_for_status()
+                chunks: list[bytes] = []
+                size = 0
+                async for chunk in response.aiter_bytes():
+                    size += len(chunk)
+                    if size > MAX_FETCH_BYTES:
+                        raise ToolError(
+                            f"That file is too large: more than "
+                            f"{MAX_FETCH_BYTES // (1024 * 1024)} MB."
+                        )
+                    chunks.append(chunk)
+                return b"".join(chunks)
+    raise ToolError(f"{url} redirected too many times.")
 
 
 @mcp.tool
@@ -808,10 +1053,12 @@ async def upload_document(
     files_base64: Annotated[
         list[str] | None,
         Field(
+            max_length=MAX_UPLOAD_FILES,
             description=(
                 "Several files at once, base64 encoded, in reading order. Each "
-                "becomes its own page unless `combine` is true."
-            )
+                "becomes its own page unless `combine` is true. At most "
+                "20 per call."
+            ),
         ),
     ] = None,
     filenames: Annotated[
@@ -838,7 +1085,13 @@ async def upload_document(
         ),
     ] = None,
     url: Annotated[
-        str | None, Field(description="Or fetch the file from this URL instead")
+        str | None,
+        Field(
+            description=(
+                "Or fetch the file from this public http(s) URL instead. "
+                "Addresses inside this server's own network are refused."
+            )
+        ),
     ] = None,
     title: Annotated[
         str | None,
@@ -866,8 +1119,9 @@ async def upload_document(
     reproduces its headings, paragraphs, lists and tables as page content. The
     original file stays attached to the page and can be downloaded later.
 
-    Supply the file either as `content_base64` or as a `url` to fetch. Accepted
-    types: PDF, PNG, JPEG, WebP, GIF, TIFF, BMP.
+    Supply the file either as `content_base64` or as a public `url` to fetch.
+    Accepted types: PDF, PNG, JPEG, WebP, GIF, TIFF, BMP; up to 50 MB each and
+    20 files per call.
 
     For several files use `files_base64` with matching `filenames`. By default
     each becomes its own page, named after its own content; with `combine=true`
@@ -892,21 +1146,18 @@ async def upload_document(
         raise ToolError(
             f"{len(files_base64)} files but {len(filenames)} filenames: they must match."
         )
-
     payloads: list[bytes] = []
     names: list[str] = []
 
     if url:
         try:
-            async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as c:
-                response = await c.get(url)
-            response.raise_for_status()
-            payloads = [response.content]
+            payloads = [await _fetch_file(url)]
         except httpx.HTTPError as exc:
             raise ToolError(f"Could not fetch {url}: {exc}") from exc
         names = [filename]
     elif files_base64:
         for i, encoded in enumerate(files_base64):
+            _check_encoded_size(encoded, f"File {i + 1} in `files_base64`")
             try:
                 payloads.append(base64.b64decode(encoded, validate=True))
             except (binascii.Error, ValueError) as exc:
@@ -915,6 +1166,7 @@ async def upload_document(
                 ) from exc
         names = list(filenames) if filenames else _numbered(filename, len(payloads))
     else:
+        _check_encoded_size(content_base64 or "", "`content_base64`")
         try:
             payloads = [base64.b64decode(content_base64 or "", validate=True)]
         except (binascii.Error, ValueError) as exc:
@@ -966,7 +1218,10 @@ async def upload_document(
             "note": "Poll each with check_import.",
         }
 
-    finished = [await _await_import(j["id"]) for j in jobs]
+    # One deadline for the whole call, not one per file: twenty files each
+    # allowed the full wait would hold this request for hours.
+    deadline = time.monotonic() + settings.MAX_WAIT_SECONDS
+    finished = [await _await_import(j["id"], deadline) for j in jobs]
     unfinished = [j for j in finished if j["status"] != "done"]
     pages = []
     for job in finished:
@@ -986,6 +1241,18 @@ async def upload_document(
     return out
 
 
+def _check_encoded_size(encoded: str, what: str) -> None:
+    """Refuse an oversized payload before it is decoded.
+
+    Base64 is four characters per three bytes, so the encoded length says how
+    big the file is without materialising it.
+    """
+    if len(encoded) > (MAX_UPLOAD_BYTES // 3 + 1) * 4:
+        raise ToolError(
+            f"{what} is too large: the limit is {MAX_UPLOAD_BYTES // (1024 * 1024)} MB."
+        )
+
+
 def _numbered(filename: str, count: int) -> list[str]:
     """Names for files that were sent without any, kept in order."""
     stem, _, suffix = filename.rpartition(".")
@@ -998,8 +1265,7 @@ def _guess_type(filename: str) -> str:
     return mimetypes.guess_type(filename)[0] or "application/octet-stream"
 
 
-async def _await_import(import_id: str) -> dict[str, Any]:
-    deadline = time.monotonic() + settings.MAX_WAIT_SECONDS
+async def _await_import(import_id: str, deadline: float) -> dict[str, Any]:
     while time.monotonic() < deadline:
         job = await _call(kb().get(f"/imports/{import_id}"))
         if job["status"] in ("done", "failed", "cancelled"):
@@ -1013,7 +1279,8 @@ async def check_import(
     import_id: Annotated[str, Field(description="Import id from upload_document")],
 ) -> dict[str, Any]:
     """How an upload is progressing, and the page id once it is done."""
-    return fmt.import_job(await _call(kb().get(f"/imports/{import_id}")))
+    job = await _call(kb().get(f"/imports/{_ident(import_id, 'import id')}"))
+    return fmt.import_job(job)
 
 
 @mcp.tool
@@ -1040,7 +1307,8 @@ async def retry_import(
     `check_import` or `list_imports` reports a failure; a successful retry creates
     the page as the first attempt would have.
     """
-    return fmt.import_job(await _call(kb().post(f"/imports/{import_id}/retry")))
+    job = await _call(kb().post(f"/imports/{_ident(import_id, 'import id')}/retry"))
+    return fmt.import_job(job)
 
 
 # ---------------------------------------------------------------------------
@@ -1058,7 +1326,8 @@ async def check_indexing(
     it can be read directly but will not appear in `search_pages` or be used by
     `ask_knowledge_base`.
     """
-    return fmt.indexing(await _call(kb().get(f"/documents/{page_id}/embeddings")))
+    doc_id = _ident(page_id, "page id")
+    return fmt.indexing(await _call(kb().get(f"/documents/{doc_id}/embeddings")))
 
 
 @mcp.tool
@@ -1075,10 +1344,11 @@ async def wait_for_indexing(
     on the result rather than assuming.
     """
     api = kb()
+    doc_id = _ident(page_id, "page id")
     deadline = time.monotonic() + timeout_seconds
     status: dict[str, Any] = {}
     while time.monotonic() < deadline:
-        status = await _call(api.get(f"/documents/{page_id}/embeddings"))
+        status = await _call(api.get(f"/documents/{doc_id}/embeddings"))
         if status.get("embedding_status") in ("ready", "failed") and not status.get(
             "is_stale"
         ):
@@ -1096,7 +1366,9 @@ async def reindex_page(
     Worth doing only when indexing previously failed, or a page looks stale in
     search. Ordinary edits re-index by themselves.
     """
-    await _call(kb().post(f"/documents/{page_id}/embeddings/regenerate"))
+    await _call(
+        kb().post(f"/documents/{_ident(page_id, 'page id')}/embeddings/regenerate")
+    )
     return {"queued": True, "page_id": page_id}
 
 

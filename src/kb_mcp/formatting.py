@@ -23,7 +23,7 @@ def plain(html: str, limit: int | None = None) -> str:
 
 
 def space(ns: dict[str, Any]) -> dict[str, Any]:
-    return {
+    out = {
         "id": ns["id"],
         "name": ns["name"],
         "slug": ns.get("slug"),
@@ -31,6 +31,11 @@ def space(ns: dict[str, Any]) -> dict[str, Any]:
         "your_role": ns.get("my_role"),
         "pages": ns.get("document_count", 0),
     }
+    # Somebody else's space, shared with this account. Worth saying: writing
+    # into it puts content in another person's knowledge base.
+    if ns.get("shared_with_you"):
+        out["shared_with_you"] = True
+    return out
 
 
 def folder(f: dict[str, Any]) -> dict[str, Any]:

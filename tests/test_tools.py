@@ -801,3 +801,87 @@ async def test_shared_pages_are_marked_as_somebody_else_s(
     out = await call(client, "list_shared_with_you")
     assert out["pages"][0]["shared_with_you"] is True
     assert out["pages"][0]["your_role"] == "editor"
+
+
+async def test_sharing_a_space_reports_the_same_three_outcomes(
+    client: Client[Any], api: Any
+) -> None:
+    route = api.post("/namespaces/n1/members/batch").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "shared": [
+                    {
+                        "id": "m1",
+                        "user": {
+                            "id": "u2",
+                            "email": "known@example.com",
+                            "full_name": "Known",
+                        },
+                        "role": "editor",
+                    }
+                ],
+                "invited": [
+                    {
+                        "id": "i1",
+                        "email": "stranger@example.com",
+                        "role": "editor",
+                        "expires_at": "2026-09-26T00:00:00Z",
+                        "target": "space",
+                    }
+                ],
+                "skipped": [],
+                "members": 2,
+                "max_members": 50,
+            },
+        )
+    )
+    out = await call(
+        client,
+        "share_space",
+        space_id="n1",
+        emails=["known@example.com", "stranger@example.com"],
+        role="editor",
+        message="Everything is in here.",
+    )
+    sent = json.loads(route.calls[0].request.content)
+    assert sent["role"] == "editor"
+    assert sent["message"] == "Everything is in here."
+    assert out["shared"][0]["email"] == "known@example.com"
+    assert out["invited"][0]["email"] == "stranger@example.com"
+    assert out["limit"] == 50
+
+
+async def test_sharing_a_space_defaults_to_read_only(
+    client: Client[Any], api: Any
+) -> None:
+    """The wider the grant, the more it should have to be asked for."""
+    route = api.post("/namespaces/n1/members/batch").mock(
+        return_value=httpx.Response(
+            200, json={"shared": [], "invited": [], "skipped": []}
+        )
+    )
+    await call(client, "share_space", space_id="n1", emails=["a@b.c"])
+    assert json.loads(route.calls[0].request.content)["role"] == "viewer"
+
+
+async def test_a_space_somebody_shared_is_marked_as_theirs(
+    client: Client[Any], api: Any
+) -> None:
+    api.get("/namespaces/").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": [
+                    space(name="Mine"),
+                    space(name="Theirs", id="n2") | {"shared_with_you": True},
+                ],
+                "count": 2,
+            },
+        )
+    )
+    out = await call(client, "list_spaces")
+    mine = [s for s in out["spaces"] if s["name"] == "Mine"][0]
+    theirs = [s for s in out["spaces"] if s["name"] == "Theirs"][0]
+    assert "shared_with_you" not in mine
+    assert theirs["shared_with_you"] is True
