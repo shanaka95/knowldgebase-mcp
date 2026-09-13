@@ -29,6 +29,7 @@ import httpx
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.dependencies import get_access_token
+from fastmcp.utilities.types import File
 from pydantic import Field
 
 from kb_mcp import formatting as fmt
@@ -1239,6 +1240,107 @@ async def upload_document(
         out["failed"] = [fmt.import_job(j) for j in unfinished]
         out["note"] = "Some files did not parse; retry_import can try again."
     return out
+
+
+# ---------------------------------------------------------------------------
+# Getting the originals back out
+# ---------------------------------------------------------------------------
+
+# A channel will refuse a very large attachment anyway, and the file has to pass
+# through a tool result to get there, so cap what can be pulled back in one go.
+MAX_FETCH_BYTES = 25 * 1024 * 1024
+
+
+@mcp.tool
+async def list_page_files(
+    page_id: Annotated[str, Field(description="Page id")],
+) -> dict[str, Any]:
+    """The original files attached to a page: the scans, PDFs and photographs it was made from.
+
+    A page created by `upload_document` keeps whatever was uploaded. Use this to
+    find out what is available before fetching it - the reply gives each file's
+    id, name, type and size, and size is worth checking because a channel will
+    reject a large attachment.
+
+    Use it when someone asks for a document itself rather than for what it says:
+    "send me the tenancy agreement", "forward that invoice".
+    """
+    doc_id = _ident(page_id, "page id")
+    try:
+        data = await kb().get("/attachments/", params={"document_id": doc_id})
+    except KnowledgeBaseError as exc:
+        raise _fail(exc) from exc
+    files = [
+        {
+            "file_id": row["id"],
+            "filename": row["filename"],
+            "content_type": row["content_type"],
+            "size_bytes": row["size"],
+        }
+        for row in data.get("data", [])
+    ]
+    if not files:
+        return {
+            "files": [],
+            "note": "This page has no attached originals. It was probably written "
+            "rather than uploaded, so the page text is all there is.",
+        }
+    return {"files": files}
+
+
+@mcp.tool
+async def get_page_file(
+    file_id: Annotated[
+        str, Field(description="File id, from list_page_files")
+    ],
+) -> Any:
+    """Fetch one original file so it can be passed on to the person who asked.
+
+    Returns the file itself, not a link. Your client saves it somewhere local
+    and tells you the path; send that file on however your channel does it.
+
+    Fetch a file only when someone wants the document itself. To answer a
+    question about what a document *says*, use `ask_knowledge_base` or
+    `get_page` - they are far cheaper than moving the bytes around.
+    """
+    attachment_id = _ident(file_id, "file id")
+    try:
+        meta = await kb().get(f"/attachments/{attachment_id}")
+    except KnowledgeBaseError as exc:
+        raise _fail(exc) from exc
+
+    size = int(meta.get("size") or 0)
+    if size > MAX_FETCH_BYTES:
+        raise ToolError(
+            f"{meta.get('filename', 'That file')} is "
+            f"{size // (1024 * 1024)} MB, over the {MAX_FETCH_BYTES // (1024 * 1024)} MB "
+            "limit for sending a file back. Tell the person it is too large to "
+            "send and point them at the page in PlusGPT instead."
+        )
+
+    try:
+        content = await kb().get(
+            f"/attachments/{attachment_id}/download", raw=True
+        )
+    except KnowledgeBaseError as exc:
+        raise _fail(exc) from exc
+
+    return File(
+        data=content,
+        name=str(meta.get("filename") or "document"),
+        format=_format_hint(str(meta.get("content_type") or "")),
+    )
+
+
+def _format_hint(content_type: str) -> str | None:
+    """Turn a MIME type into the short format tag ``File`` expects.
+
+    ``File`` builds ``application/<format>``, which is right for pdf and wrong
+    for images, so hand it nothing when the guess would be worse than the
+    extension already on the name.
+    """
+    subtype = content_type.partition("/")[2].strip().lower()
+    return subtype if content_type.startswith("application/") and subtype else None
 
 
 def _check_encoded_size(encoded: str, what: str) -> None:

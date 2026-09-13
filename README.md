@@ -63,6 +63,8 @@ far the grant reaches.
 | Tool | What it does |
 | --- | --- |
 | `upload_document` | Turn PDFs or images into pages, keeping the originals attached |
+| `list_page_files` | The originals attached to a page: name, type and size |
+| `get_page_file` | Fetch one original back, to pass on to whoever asked |
 | `check_import` | Progress of one upload |
 | `list_imports` | Recent uploads and how they turned out |
 | `retry_import` | Re-parse a failed upload without resending the file |

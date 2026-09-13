@@ -131,6 +131,17 @@ again.
 
 `get_page` reads one in full.
 
+## Giving a document back
+
+When someone wants the document itself rather than what it says - "send me the
+tenancy agreement" - the original is still attached to the page.
+`list_page_files` says what is there, `get_page_file` fetches one. Your client
+saves it locally and tells you the path; send that file on however this channel
+sends files.
+
+For a question *about* a document, do not fetch it. `ask_knowledge_base` is far
+cheaper than moving bytes around, and it answers with citations.
+
 ## What not to do
 
 - **Do not transcribe a file you could have uploaded.** This is the single most
@@ -150,7 +161,7 @@ again.
 | Orientation | `whoami`, `list_spaces`, `browse_space`, `recent_pages`, `list_page_types` |
 | Reading | `get_page`, `search_pages`, `ask_knowledge_base` |
 | Writing | `create_page`, `update_page`, `create_folder`, `move_page`, `delete_page` |
-| Files | `upload_document`, `check_import`, `list_imports`, `retry_import` |
+| Files | `upload_document`, `list_page_files`, `get_page_file`, `check_import`, `list_imports`, `retry_import` |
 | Sharing | `share_page`, `share_space`, `unshare_page`, `remove_from_space`, `list_people_with_access`, `list_space_members`, `share_page_by_link`, `stop_sharing_by_link`, `read_public_page`, `clone_page`, `list_shared_with_you` |
 | Indexing | `check_indexing`, `wait_for_indexing`, `reindex_page` |
 

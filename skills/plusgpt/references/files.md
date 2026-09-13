@@ -145,6 +145,26 @@ the answer will honestly tell you it has nothing on the topic.
 `list_imports` shows recent uploads and how they turned out, which is how you
 recover a page id you did not keep.
 
+## Getting an original back
+
+The file a page was made from stays attached to it.
+
+```
+list_page_files(page_id="...")
+  -> {"files": [{"file_id": "...", "filename": "tenancy.pdf",
+                 "content_type": "application/pdf", "size_bytes": 184320}]}
+
+get_page_file(file_id="...")
+  -> the file itself; your client saves it and reports the path
+```
+
+Check `size_bytes` first: anything over 25 MB is refused, and most channels
+refuse far less. A page written by hand rather than uploaded has no files, and
+`list_page_files` says so.
+
+Fetch a file only when the person wants the document. To answer a question
+about its contents, `ask_knowledge_base` costs a fraction as much.
+
 ## The `url` parameter
 
 `upload_document` can fetch a public http(s) URL instead of taking bytes. It is
