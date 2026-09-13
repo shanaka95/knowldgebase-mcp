@@ -84,6 +84,12 @@ Never dump a file into whatever space is first. Before uploading:
 2. `browse_space` — the folders and pages already in the likely one.
 3. `list_page_types` — the vocabulary they already file under.
 
+**Aim for a folder, not the root.** A space's root is where things go to be
+lost: it has no subject, so nothing there is findable by browsing and everything
+accumulates in one list. Put the page in the folder that fits, and if none does,
+propose creating one. Use the root only when the space has no folders at all and
+there is too little in it to organise yet.
+
 Then **look at what the document actually is** and propose a destination:
 
 > "This is a tenancy agreement for the Berlin flat. I'd put it in

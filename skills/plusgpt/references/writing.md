@@ -65,6 +65,17 @@ the page for the wrong reason and the reader has to hunt. Two pages cost nothing
 thousand", write "about 3,500 EUR (approximate — confirm against the contract)".
 Do not round it into a number that looks certain.
 
+## Where it goes
+
+A folder, not the space root, wherever one fits. `browse_space` shows what
+exists; reuse the folder somebody already made for this kind of thing rather
+than starting a parallel one beside it.
+
+If nothing fits, `create_folder` and say so — "there's no folder for insurance,
+shall I make one?" is a better question than silently dropping a policy into the
+root. The root is the right answer only for a space with no folders yet and too
+little in it to organise.
+
 ## doc_type
 
 Give every page a type: Contract, Invoice, Payslip, Letter, Note, Meeting notes,

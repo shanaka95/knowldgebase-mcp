@@ -352,9 +352,9 @@ async def ask_knowledge_base(
             ge=1,
             le=25,
             description=(
-                "How many pages to shortlist. The best few of these are what the "
-                "answer is actually written from, so raising this widens the "
-                "search rather than lengthening the answer."
+                "How many pages to shortlist. The best three of those are read "
+                "in full and the answer is written from them, so raising this "
+                "widens the search rather than lengthening the answer."
             ),
         ),
     ] = 10,
