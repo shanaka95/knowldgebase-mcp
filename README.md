@@ -128,6 +128,39 @@ Give the key the **write** scope if the agent should create or edit pages. A
 read-only key still searches and asks; writes are refused with a message saying
 so.
 
+## The skill
+
+Connecting the server tells an agent *what it can call*. It does not tell it
+*how to behave* - and the two mistakes that matter most are behavioural: reading
+a PDF itself instead of passing the bytes, and filing a document wherever
+without asking. `skills/plusgpt/` is a skill that settles both.
+
+```
+skills/plusgpt/
+  SKILL.md              what PlusGPT is, when to use it, the whole tool list
+  references/files.md   handing over files: formats, limits, combine, failures
+  references/writing.md writing pages by hand: markdown support, page quality
+```
+
+Copy the directory into wherever the agent loads skills from - for Claude Code
+that is `.claude/skills/plusgpt/` in a project or `~/.claude/skills/plusgpt/`
+for every project:
+
+```bash
+cp -R skills/plusgpt ~/.claude/skills/
+```
+
+It is plain markdown with YAML frontmatter, so any agent that reads skills can
+use it as-is. Its central instruction is that the agent passes files straight to
+`upload_document` rather than transcribing them, because a vision model on the
+server side reads scans, photographs and handwriting better than a transcription
+does - and keeps the original attached to the page.
+
+`tests/test_skill.py` checks the skill against the running server: every tool is
+mentioned, no invented tool is named, every promised `upload_document` parameter
+exists, and the accepted formats match the ones the server really takes. If a
+tool is renamed and the skill is not updated, that test fails.
+
 ## Running it
 
 With Docker, pointed at a Knowledge Base you can reach:
