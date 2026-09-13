@@ -358,38 +358,68 @@ async def ask_knowledge_base(
             ),
         ),
     ] = 10,
+    write_answer: Annotated[
+        bool,
+        Field(
+            description=(
+                "Have the knowledge base write the answer too. Off by default: "
+                "you are going to phrase a reply anyway, and answering twice "
+                "costs a second model call and drifts from the source."
+            )
+        ),
+    ] = False,
 ) -> dict[str, Any]:
-    """Answer a question from the knowledge base, with citations.
+    """Find the pages that answer a question, and read them in full.
 
-    This searches, reads the best pages, and writes an answer grounded in them.
-    The answer cites its sources as `[1]`, `[2]` matching the `citations` list,
-    so every claim can be traced to a page.
+    Searches, reranks, and returns the best three pages **whole** in
+    `documents`. Write the answer yourself from those - that is the intended
+    use. You have to phrase a reply to the person either way, so having the
+    knowledge base write one first only to rewrite it costs a second model call
+    and loses a little of the source in the retelling.
 
-    It answers only from what is stored. When the knowledge base has nothing on
-    the topic it says so rather than guessing - treat that as a real answer, not
-    a failure.
+    Say where something came from by `title`. If the pages do not cover the
+    question, say so rather than filling the gap from your own knowledge -
+    nothing outside `documents` is part of this knowledge base.
 
-    `pages_considered` is how many pages the search turned up; `pages_used` is
-    how many the answer was actually written from. The gap is not a problem: the
-    shortlist is deliberately wide, and a reranker then keeps the pages that
-    genuinely address the question.
+    `pages_considered` is how many the search turned up; `pages_used` is how
+    many survived reranking. The gap is not a problem: the shortlist is
+    deliberately wide and the reranker keeps only what addresses the question.
+    `truncated` means a page was too long to send whole.
 
-    Slower than `search_pages` (several seconds), because a model writes the
-    reply. Use `search_pages` when you only need to locate pages.
+    Set `write_answer=true` only when you want the knowledge base's own wording
+    - it returns `answer` with `[1]`-style citations, and costs an extra
+    generation.
+
+    Use `search_pages` instead when you only need to locate pages, not read them.
     """
     body: dict[str, Any] = {"q": question, "top_k": pages_to_read}
     if space_id:
         body["namespace_id"] = space_id
+
+    if write_answer:
+        data = await _call(
+            kb().post("/ask/", json=body, timeout=settings.KB_LONG_TIMEOUT_SECONDS)
+        )
+        return {
+            "question": question,
+            "answer": data["answer"],
+            "citations": [fmt.citation(c) for c in data.get("citations", [])],
+            "pages_considered": data.get("searched", 0),
+            "pages_used": data.get("used", 0),
+            "reranked": data.get("reranked", False),
+        }
+
     data = await _call(
-        kb().post("/ask/", json=body, timeout=settings.KB_LONG_TIMEOUT_SECONDS)
+        kb().post("/ask/context", json=body, timeout=settings.KB_LONG_TIMEOUT_SECONDS)
     )
     return {
         "question": question,
-        "answer": data["answer"],
-        "citations": [fmt.citation(c) for c in data.get("citations", [])],
+        "documents": [fmt.source_document(d) for d in data.get("documents", [])],
         "pages_considered": data.get("searched", 0),
         "pages_used": data.get("used", 0),
         "reranked": data.get("reranked", False),
+        "truncated": data.get("truncated", False),
+        "answer_from": "the documents above; nothing else is in this knowledge base",
     }
 
 

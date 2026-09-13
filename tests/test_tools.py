@@ -139,6 +139,56 @@ async def test_search_refuses_to_disable_both_methods(client: Client[Any]) -> No
         await call(client, "search_pages", query="x", keyword=False, semantic=False)
 
 
+async def test_ask_hands_over_whole_pages_and_writes_no_answer(
+    client: Client[Any], api: Any
+) -> None:
+    """The caller writes the reply, so it gets the pages rather than a summary.
+
+    Answering here and letting the calling model rewrite that answer pays for
+    two generations to say one thing, and the second is a retelling of the
+    first rather than of the page.
+    """
+    long_page = "Notice is three months. " * 400
+    context = api.post("/ask/context").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "question": "what is the notice period?",
+                "documents": [
+                    {
+                        "index": 1,
+                        "document_id": "d1",
+                        "title": "Employment Contract",
+                        "namespace_id": "n1",
+                        "namespace_slug": "office",
+                        "namespace_name": "Office",
+                        "text": long_page,
+                        "cited": False,
+                        "score": 0.9,
+                    }
+                ],
+                "searched": 10,
+                "used": 1,
+                "passages": 1,
+                "reranked": True,
+                "truncated": False,
+            },
+        )
+    )
+    answering = api.post("/ask/").mock(return_value=httpx.Response(500))
+
+    out = await call(client, "ask_knowledge_base", question="what is the notice period?")
+
+    assert context.called, "it reads the pages"
+    assert not answering.called, "and does not pay for an answer it will not use"
+    assert "answer" not in out, "the caller writes it"
+    assert len(out["documents"]) == 1
+    assert out["documents"][0]["text"] == long_page.strip(), (
+        "the whole page, not a preview of it"
+    )
+    assert out["pages_considered"] == 10 and out["pages_used"] == 1
+
+
 async def test_ask_returns_the_answer_with_its_citations(
     client: Client[Any], api: Any
 ) -> None:
@@ -180,7 +230,12 @@ async def test_ask_returns_the_answer_with_its_citations(
             },
         )
     )
-    out = await call(client, "ask_knowledge_base", question="how do I fail over?")
+    out = await call(
+        client,
+        "ask_knowledge_base",
+        question="how do I fail over?",
+        write_answer=True,
+    )
     assert out["answer"] == "Promote the standby [1]."
     used = [c for c in out["citations"] if c["used_in_answer"]]
     assert len(used) == 1 and used[0]["number"] == 1

@@ -18,8 +18,8 @@ anything. You hand it material and ask it questions.
 letter, a bill, an insurance document, a photo of a receipt, a note the user
 dictates — it goes in.
 
-**You need to know something.** Ask it. `ask_knowledge_base` for an answer with
-citations, `search_pages` when you want to look at the pages yourself.
+**You need to know something.** Ask it. `ask_knowledge_base` for the pages that
+answer it, which you then answer from; `search_pages` to locate pages instead.
 
 Prefer asking the knowledge base over asking the user something they have already
 told you. Checking costs one call; making them repeat themselves costs their
@@ -131,10 +131,20 @@ More, including the shape of a good page and how to update one safely, is in
 
 ## Asking it things
 
-`ask_knowledge_base` returns a written answer with citations, drawn from the
-user's own pages. It answers only from what is stored — if it says it has nothing
-on the topic, that is a real answer, not a failure. Say so rather than filling the
-gap from your own guesses.
+`ask_knowledge_base` searches, reranks, and hands you the best three pages
+**whole**, in `documents`. Write the answer yourself from those.
+
+That is deliberate. You have to phrase a reply either way, so having the
+knowledge base write one for you to rewrite costs a second model call and loses
+a little of the source in the retelling. Answer from the page, and name where it
+came from by title.
+
+It covers only what is stored. If `documents` comes back empty, or does not
+address the question, say so — do not fill the gap from your own knowledge.
+`truncated` means a page was too long to send in full.
+
+Pass `write_answer=true` only when you specifically want the knowledge base's
+own wording; it costs an extra generation.
 
 `search_pages` returns pages rather than an answer. Use it when you want to read
 them yourself, or to check whether something is already filed before adding it

@@ -122,6 +122,21 @@ def citation(c: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def source_document(c: dict[str, Any]) -> dict[str, Any]:
+    """One page handed to a caller that is going to write the answer itself.
+
+    Unlike `citation`, the text is not trimmed: the point is to answer from the
+    page rather than from a preview of it, and the sentence that qualifies the
+    figure is rarely in the first 600 characters.
+    """
+    return {
+        "page_id": c["document_id"],
+        "title": c["title"],
+        "space": c.get("namespace_name"),
+        "text": plain(c.get("text", "")),
+    }
+
+
 def share(row: dict[str, Any]) -> dict[str, Any]:
     user = row.get("user") or {}
     return {
