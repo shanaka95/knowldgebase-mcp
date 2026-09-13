@@ -30,6 +30,11 @@ patience.
 **Pass the file straight to `upload_document`. Do not read it, transcribe it, or
 convert it yourself.**
 
+If the file arrived in a chat and your client gave you a local path rather than
+the bytes, use `send_file_to_knowledge_base` with that path instead — same rule,
+same result. Never ask somebody to re-send a file you were already handed a path
+to, and never ask them to paste its contents.
+
 A vision model on the other side reads PDFs, scans and photographs — including
 handwriting and tables — and turns them into a proper page with its structure
 intact. Your transcription would be worse, slower, and would lose the original.

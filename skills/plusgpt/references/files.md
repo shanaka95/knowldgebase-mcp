@@ -10,6 +10,30 @@ copy with no original behind it.
 
 Parse a document yourself **only** when the user explicitly asks you to.
 
+## When you were given a path, not bytes
+
+A file sent over a messaging channel usually reaches you as a local path. You
+cannot read it — that is deliberate — so pass the path along:
+
+```
+send_file_to_knowledge_base(
+  path="/…/cache/documents/tenancy.pdf",   # exactly as you were given it
+  space_id="…",
+  folder_id="…",
+  doc_type="Contract",
+)
+```
+
+It reads the file and hands it to the knowledge base, which parses it and keeps
+the original. Only files from the current conversation can be read this way; any
+other path is refused, so do not try to widen it.
+
+The two failures worth naming, because both waste somebody's time:
+
+- **Asking them to re-send it.** You already have the path. Use it.
+- **Asking them to paste the contents.** The knowledge base reads documents far
+  better than a person can retype one.
+
 ## What is accepted
 
 | | |
